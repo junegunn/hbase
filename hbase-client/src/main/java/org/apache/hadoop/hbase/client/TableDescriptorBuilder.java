@@ -190,6 +190,14 @@ public class TableDescriptorBuilder {
     new Bytes(Bytes.toBytes(RSGroupInfo.TABLE_DESC_PROP_GROUP));
 
   /**
+   * Assignment retries for the table
+   */
+  @InterfaceAudience.Private
+  public static final String MAX_ASSIGNMENT_ATTEMPTS = "MAX_ASSIGNMENT_ATTEMPTS";
+  private static final Bytes MAX_ASSIGNMENT_ATTEMPTS_KEY =
+    new Bytes(Bytes.toBytes(MAX_ASSIGNMENT_ATTEMPTS));
+
+  /**
    * Relative priority of the table used for rpc scheduling
    */
   private static final int DEFAULT_PRIORITY = HConstants.NORMAL_QOS;
@@ -446,6 +454,11 @@ public class TableDescriptorBuilder {
 
   public TableDescriptorBuilder setDurability(Durability durability) {
     desc.setDurability(durability);
+    return this;
+  }
+
+  public TableDescriptorBuilder setMaxAssignmentAttempts(int attempts) {
+    desc.setMaxAssignmentAttempts(attempts);
     return this;
   }
 
@@ -920,6 +933,17 @@ public class TableDescriptorBuilder {
     @Override
     public Durability getDurability() {
       return getOrDefault(DURABILITY_KEY, Durability::valueOf, DEFAULT_DURABLITY);
+    }
+
+    // TODO
+    public ModifyableTableDescriptor setMaxAssignmentAttempts(int attempts) {
+      return setValue(MAX_ASSIGNMENT_ATTEMPTS_KEY, Integer.toString(attempts));
+    }
+
+    // TODO
+    @Override
+    public int getMaxAssignmentAttempts() {
+      return getOrDefault(MAX_ASSIGNMENT_ATTEMPTS_KEY, Integer::valueOf, -1);
     }
 
     /**

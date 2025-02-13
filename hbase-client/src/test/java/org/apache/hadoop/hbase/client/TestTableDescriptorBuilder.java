@@ -66,9 +66,9 @@ public class TestTableDescriptorBuilder {
   @Test
   public void testPb() throws DeserializationException, IOException {
     final int v = 123;
-    TableDescriptor htd =
-      TableDescriptorBuilder.newBuilder(TableName.META_TABLE_NAME).setMaxFileSize(v)
-        .setDurability(Durability.ASYNC_WAL).setReadOnly(true).setRegionReplication(2).build();
+    TableDescriptor htd = TableDescriptorBuilder.newBuilder(TableName.META_TABLE_NAME)
+      .setMaxFileSize(v).setDurability(Durability.ASYNC_WAL).setReadOnly(true)
+      .setRegionReplication(2).setMaxAssignmentAttempts(1).build();
 
     byte[] bytes = TableDescriptorBuilder.toByteArray(htd);
     TableDescriptor deserializedHtd = TableDescriptorBuilder.parseFrom(bytes);
@@ -77,6 +77,7 @@ public class TestTableDescriptorBuilder {
     assertTrue(deserializedHtd.isReadOnly());
     assertEquals(Durability.ASYNC_WAL, deserializedHtd.getDurability());
     assertEquals(2, deserializedHtd.getRegionReplication());
+    assertEquals(1, deserializedHtd.getMaxAssignmentAttempts());
   }
 
   /**

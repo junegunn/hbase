@@ -275,6 +275,9 @@ public interface TableDescriptor {
     return null;
   }
 
+  // TODO
+  int getMaxAssignmentAttempts();
+
   /**
    * Returns Name of this table and then a map of all of the column family descriptors (with only
    * the non-default column family attributes)

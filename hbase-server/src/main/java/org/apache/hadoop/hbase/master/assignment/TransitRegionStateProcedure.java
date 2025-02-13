@@ -34,6 +34,7 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
 import org.apache.hadoop.hbase.client.RetriesExhaustedException;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.master.MetricsAssignmentManager;
 import org.apache.hadoop.hbase.master.RegionState.State;
 import org.apache.hadoop.hbase.master.ServerManager;
@@ -308,10 +309,24 @@ public class TransitRegionStateProcedure
       () -> openRegionAfterUpdatingMeta(loc));
   }
 
+  private int getMaxAttempts(MasterProcedureEnv env, RegionStateNode regionNode) {
+    TableName table = regionNode.getTable();
+    try {
+      TableDescriptor descriptor = env.getMasterServices().getTableDescriptors().get(table);
+      int maxAttempts = descriptor.getMaxAssignmentAttempts();
+      if (maxAttempts >= 0) {
+        return maxAttempts;
+      }
+    } catch (IOException e) {
+      LOG.warn("Failed to get table descriptor for {}, use the default max attempts", table, e);
+    }
+    return env.getAssignmentManager().getAssignMaxAttempts();
+  }
+
   private void regionFailedOpenAfterUpdatingMeta(MasterProcedureEnv env,
     RegionStateNode regionNode) {
     setFailure(getClass().getSimpleName(), new RetriesExhaustedException(
-      "Max attempts " + env.getAssignmentManager().getAssignMaxAttempts() + " exceeded"));
+      "Max attempts " + getMaxAttempts(env, regionNode) + " exceeded"));
     regionNode.unsetProcedure(this);
   }
 
@@ -342,7 +357,7 @@ public class TransitRegionStateProcedure
 
     int retries = env.getAssignmentManager().getRegionStates().addToFailedOpen(regionNode)
       .incrementAndGetRetries();
-    int maxAttempts = env.getAssignmentManager().getAssignMaxAttempts();
+    int maxAttempts = getMaxAttempts(env, regionNode);
     LOG.info("Retry={} of max={}; {}; {}", retries, maxAttempts, this, regionNode.toShortString());
 
     if (retries >= maxAttempts) {

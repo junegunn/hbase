@@ -1596,6 +1596,7 @@ module Hbase
         if arg.include?(TableDescriptorBuilder::NORMALIZER_TARGET_REGION_SIZE_MB)
       tdb.setMemStoreFlushSize(arg.delete(TableDescriptorBuilder::MEMSTORE_FLUSHSIZE)) if arg.include?(TableDescriptorBuilder::MEMSTORE_FLUSHSIZE)
       tdb.setDurability(org.apache.hadoop.hbase.client.Durability.valueOf(arg.delete(TableDescriptorBuilder::DURABILITY))) if arg.include?(TableDescriptorBuilder::DURABILITY)
+      tdb.setMaxAssignmentAttempts(JInteger.valueOf(arg.delete(TableDescriptorBuilder::MAX_ASSIGNMENT_ATTEMPTS))) if arg.include?(TableDescriptorBuilder::MAX_ASSIGNMENT_ATTEMPTS)
       tdb.setPriority(JInteger.valueOf(arg.delete(TableDescriptorBuilder::PRIORITY))) if arg.include?(TableDescriptorBuilder::PRIORITY)
       tdb.setFlushPolicyClassName(arg.delete(TableDescriptorBuilder::FLUSH_POLICY)) if arg.include?(TableDescriptorBuilder::FLUSH_POLICY)
       tdb.setRegionMemStoreReplication(JBoolean.valueOf(arg.delete(TableDescriptorBuilder::REGION_MEMSTORE_REPLICATION))) if arg.include?(TableDescriptorBuilder::REGION_MEMSTORE_REPLICATION)
