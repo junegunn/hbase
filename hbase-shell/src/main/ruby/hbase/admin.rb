@@ -767,6 +767,90 @@ module Hbase
     #----------------------------------------------------------------------------------------------
     # Change table structure or table options
     def alter(table_name_str, wait = true, *args)
+      new_tdb, reopen_regions = altered_descriptor(table_name_str, *args)
+      return unless new_tdb
+
+      do_alter(new_tdb, reopen_regions, wait)
+    end
+
+    private def do_alter(tdb, reopen_regions, wait)
+      # Bulk apply all table modifications.
+      future = @admin.modifyTableAsync(tdb.build, reopen_regions)
+      if reopen_regions == false
+        puts("WARNING: You are using REOPEN_REGIONS => 'false' to modify a table, which will
+        result in inconsistencies in the configuration of online regions and other risks. If you
+        encounter any issues, use the original 'alter' command to make the modification again!")
+        future.get
+      elsif wait == true
+        puts 'Updating all regions with the new schema...'
+        future.get
+      end
+    end
+
+    def alter_safe(table_name_str, wait = true, *args)
+      # TODO: Check if the table is currently enabled. If it isn't, we can't be sure if the current
+      # schema/configuration of it is valid. If we try to create a temp table with the same schema,
+      # and if it contains errors, we'll be stuck in 'ENABLING' state.
+      new_tdb, reopen_regions = altered_descriptor(table_name_str, *args)
+      unless new_tdb
+        puts 'No changes to apply.'
+        return
+      end
+      unless reopen_regions
+        puts 'No need to reopen regions. Proceeding ...'
+        return do_alter(new_tdb, reopen_regions, true)
+      end
+
+      # The temp table might already exist. Two possibilities:
+      #   1. Previous 'alter_safe' failed in the middle
+      #   2. The other user is performing 'alter_safe' at the same time.
+      # TODO: Check the creation time of the table, and if it's sufficiently old, drop it,
+      #       otherwise, abort the operation.
+      table_name = TableName.valueOf(table_name_str)
+      temp_table_name = TableName.valueOf("hbase:_alter_safe_#{table_name_str}")
+      orig_tdb = TableDescriptorBuilder.newBuilder(@admin.getDescriptor(table_name))
+      temp_tdb, temp_tdb_altered = [orig_tdb, new_tdb].map do |tdb|
+        TableDescriptorBuilder.newBuilder(
+          TableDescriptorBuilder.copy(temp_table_name, tdb.build)
+        ).setMaxAssignmentAttempts(1)
+      end
+
+      puts "Creating a temporary table '#{temp_table_name}' for verifying schema changes ..."
+      begin
+        @admin.createTable(temp_tdb.build)
+        @admin.modifyTableAsync(temp_tdb_altered.build).get
+      rescue java.lang.Throwable => e
+        message = '* Alter aborted. Please check the server logs for more information.'
+        unless @admin.tableExists(temp_table_name)
+          puts "* Failed to create temporary table: #{e}"
+          puts message
+          return
+        end
+
+        puts "* Error altering temporary table: #{e}"
+        print '  * Checking the region state: '
+        scan = MetaTableAccessor.getScanForTableName(@conf, temp_table_name)
+        states = @connection.getTable(TableName::META_TABLE_NAME).getScanner(scan).map do |result|
+          result.getValue('info'.to_java_bytes, 'state'.to_java_bytes).to_s
+        end
+        puts states.join(', ')
+
+        puts '* Dropping the temporary table ...'
+        @admin.disableTable(temp_table_name)
+        @admin.deleteTable(temp_table_name)
+        puts message
+        return
+      end
+
+      puts 'Succeeded to alter temporary table. Dropping it ...'
+      @admin.disableTable(temp_table_name)
+      @admin.deleteTable(temp_table_name)
+
+      puts 'Applying the schema changes to the original table ...'
+      do_alter(new_tdb, reopen_regions, true)
+    end
+
+    private def altered_descriptor(table_name_str, *args)
       # Table name should be a string
       raise(ArgumentError, 'Table name must be of type String') unless
           table_name_str.is_a?(String)
@@ -921,19 +1005,7 @@ module Hbase
         next
       end
 
-      # Bulk apply all table modifications.
-      if hasTableUpdate
-        future = @admin.modifyTableAsync(tdb.build, reopen_regions)
-        if reopen_regions == false
-          puts("WARNING: You are using REOPEN_REGIONS => 'false' to modify a table, which will
-          result in inconsistencies in the configuration of online regions and other risks. If you
-          encounter any issues, use the original 'alter' command to make the modification again!")
-          future.get
-        elsif wait == true
-          puts 'Updating all regions with the new schema...'
-          future.get
-        end
-      end
+      [tdb, reopen_regions] if hasTableUpdate
     end
 
     def status(format, type)
