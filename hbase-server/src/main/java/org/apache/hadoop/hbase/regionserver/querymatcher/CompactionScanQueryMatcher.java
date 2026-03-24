@@ -20,8 +20,10 @@ package org.apache.hadoop.hbase.regionserver.querymatcher;
 import static org.apache.hadoop.hbase.HConstants.EMPTY_START_ROW;
 
 import java.io.IOException;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.ExtendedCell;
 import org.apache.hadoop.hbase.KeepDeletedCells;
+import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.regionserver.RegionCoprocessorHost;
 import org.apache.hadoop.hbase.regionserver.ScanInfo;
@@ -44,6 +46,15 @@ public abstract class CompactionScanQueryMatcher extends ScanQueryMatcher {
   /** whether to return deleted rows */
   protected final KeepDeletedCells keepDeletedCells;
 
+  /** The effective max versions for this store, used to drop overwritten versions. */
+  private final int cfMaxVersions;
+
+  /** Total versions seen for the current column, including cell-level TTL expired ones. */
+  private int columnVersions;
+
+  /** Current column cell for detecting column boundaries. */
+  private ExtendedCell columnCell;
+
   protected CompactionScanQueryMatcher(ScanInfo scanInfo, DeleteTracker deletes,
     ColumnTracker columnTracker, long readPointToUse, long oldestUnexpiredTS, long now) {
     super(createStartKeyFromRow(EMPTY_START_ROW, scanInfo), scanInfo, columnTracker,
@@ -51,12 +62,41 @@ public abstract class CompactionScanQueryMatcher extends ScanQueryMatcher {
     this.maxReadPointToTrackVersions = readPointToUse;
     this.deletes = deletes;
     this.keepDeletedCells = scanInfo.getKeepDeletedCells();
+    this.cfMaxVersions = scanInfo.getMaxVersions();
   }
 
   @Override
   public void beforeShipped() throws IOException {
     super.beforeShipped();
     deletes.beforeShipped();
+    if (columnCell != null) {
+      this.columnCell = KeyValueUtil.toNewKeyCell(this.columnCell);
+    }
+  }
+
+  /**
+   * Track a version for the current column. Resets the counter when the column changes.
+   * @return the new total version count for this column (including expired).
+   */
+  protected int trackColumnVersion(ExtendedCell cell) {
+    if (columnCell == null || !CellUtil.matchingQualifier(cell, columnCell)) {
+      columnVersions = 0;
+      columnCell = cell;
+    }
+    return ++columnVersions;
+  }
+
+  /**
+   * Check if this cell would have been pruned due to the CF version limit, considering all
+   * versions including cell-level TTL expired ones. Should be called for non-delete Put cells
+   * that passed preCheck and checkDeleted.
+   * @return a non-null MatchCode if the cell should be skipped, null to continue normal matching.
+   */
+  protected MatchCode checkCFVersionLimit(ExtendedCell cell) {
+    if (trackColumnVersion(cell) > cfMaxVersions) {
+      return columns.getNextRowOrNextColumn(cell);
+    }
+    return null;
   }
 
   @Override
@@ -89,6 +129,8 @@ public abstract class CompactionScanQueryMatcher extends ScanQueryMatcher {
   @Override
   protected void reset() {
     deletes.reset();
+    columnVersions = 0;
+    columnCell = null;
   }
 
   protected final void trackDelete(ExtendedCell cell) {

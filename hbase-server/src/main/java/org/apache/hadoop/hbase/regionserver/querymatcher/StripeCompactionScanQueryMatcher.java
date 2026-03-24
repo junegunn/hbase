@@ -53,6 +53,9 @@ public class StripeCompactionScanQueryMatcher extends DropDeletesCompactionScanQ
   public MatchCode match(ExtendedCell cell) throws IOException {
     MatchCode returnCode = preCheck(cell);
     if (returnCode != null) {
+      if (returnCode == MatchCode.SKIP) {
+        trackColumnVersion(cell);
+      }
       return returnCode;
     }
     long mvccVersion = cell.getSequenceId();
@@ -77,6 +80,10 @@ public class StripeCompactionScanQueryMatcher extends DropDeletesCompactionScanQ
       if (returnCode != null) {
         return returnCode;
       }
+    }
+    returnCode = checkCFVersionLimit(cell);
+    if (returnCode != null) {
+      return returnCode;
     }
     // Skip checking column since we do not remove column during compaction.
     return columns.checkVersions(cell, cell.getTimestamp(), typeByte,

@@ -24,6 +24,7 @@ import static org.junit.Assert.assertFalse;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.ExtendedCell;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
@@ -31,12 +32,15 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.PrivateCellUtil;
+import org.apache.hadoop.hbase.Tag;
+import org.apache.hadoop.hbase.TagType;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.FilterBase;
 import org.apache.hadoop.hbase.regionserver.ScanInfo;
 import org.apache.hadoop.hbase.regionserver.querymatcher.ScanQueryMatcher.MatchCode;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.junit.ClassRule;
 import org.junit.Test;
@@ -395,5 +399,99 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
     ExtendedCell lastCell = memstore.get(memstore.size() - 1);
     Cell nextCell = qm.getKeyForNextColumn(lastCell);
     assertArrayEquals(nextCell.getQualifierArray(), col4);
+  }
+
+  /**
+   * Verify that a cell-level TTL expired cell still counts toward the version limit. With
+   * VERSIONS=1, if v2 (with TTL) overwrites v1 (no TTL), v1 should not reappear after v2 expires.
+   */
+  @Test
+  public void testCellTTLExpiredCountsTowardVersionLimit() throws IOException {
+    long now = EnvironmentEdgeManager.currentTime();
+    long cellTTL = 5000; // 5 seconds
+
+    // Wildcard scan, VERSIONS=1
+    Scan wildScan = new Scan();
+    UserScanQueryMatcher qm = UserScanQueryMatcher.create(wildScan,
+      new ScanInfo(this.conf, fam1, 0, 1, ttl, KeepDeletedCells.FALSE,
+        HConstants.DEFAULT_BLOCKSIZE, 0, rowComparator, false),
+      null, now - ttl, now, null);
+
+    // v2 has a cell-level TTL that has already expired (timestamp is old enough)
+    Tag ttlTag = new ArrayBackedTag(TagType.TTL_TAG_TYPE, Bytes.toBytes(cellTTL));
+    // v2: newer timestamp, TTL expired (written cellTTL+1 ms ago)
+    KeyValue v2 = new KeyValue(row1, fam1, col1, now - cellTTL - 1, data, new Tag[] { ttlTag });
+    // v1: older timestamp, no TTL
+    KeyValue v1 = new KeyValue(row1, fam1, col1, now - cellTTL - 2, data);
+
+    qm.setToNewRow(v2);
+
+    // v2 is expired by cell TTL: should be skipped but still count as a version
+    MatchCode v2Code = qm.match(v2);
+    assertEquals(MatchCode.SKIP, v2Code);
+
+    // v1 should be rejected because v2 already consumed the single allowed version
+    MatchCode v1Code = qm.match(v1);
+    assertEquals(MatchCode.SEEK_NEXT_COL, v1Code);
+  }
+
+  /**
+   * Verify that with CF VERSIONS=2 and default scan maxVersions=1, the older version survives
+   * after the newer TTL'd version expires, because both fit within the CF's version limit.
+   */
+  @Test
+  public void testCellTTLExpiredWithHigherCFVersionLimit() throws IOException {
+    long now = EnvironmentEdgeManager.currentTime();
+    long cellTTL = 5000;
+
+    // Default scan (maxVersions=1), but CF VERSIONS=2
+    Scan wildScan = new Scan();
+    UserScanQueryMatcher qm = UserScanQueryMatcher.create(wildScan,
+      new ScanInfo(this.conf, fam1, 0, 2, ttl, KeepDeletedCells.FALSE,
+        HConstants.DEFAULT_BLOCKSIZE, 0, rowComparator, false),
+      null, now - ttl, now, null);
+
+    Tag ttlTag = new ArrayBackedTag(TagType.TTL_TAG_TYPE, Bytes.toBytes(cellTTL));
+    KeyValue v2 = new KeyValue(row1, fam1, col1, now - cellTTL - 1, data, new Tag[] { ttlTag });
+    KeyValue v1 = new KeyValue(row1, fam1, col1, now - cellTTL - 2, data);
+
+    qm.setToNewRow(v2);
+
+    // v2 expired: skipped by preCheck
+    assertEquals(MatchCode.SKIP, qm.match(v2));
+
+    // v1: total column versions = 2, within CF limit of 2, so it reaches matchColumn.
+    // matchColumn's tracker uses min(scan=1, cf=2)=1, so v1 is version 1 of 1 -> INCLUDE.
+    assertEquals(MatchCode.INCLUDE, qm.match(v1));
+  }
+
+  /**
+   * Verify that with CF VERSIONS=2, if two expired versions fill the CF limit, the third version
+   * is blocked even though it has no TTL.
+   */
+  @Test
+  public void testCellTTLExpiredExceedsCFVersionLimit() throws IOException {
+    long now = EnvironmentEdgeManager.currentTime();
+    long cellTTL = 5000;
+
+    Scan wildScan = new Scan();
+    UserScanQueryMatcher qm = UserScanQueryMatcher.create(wildScan,
+      new ScanInfo(this.conf, fam1, 0, 2, ttl, KeepDeletedCells.FALSE,
+        HConstants.DEFAULT_BLOCKSIZE, 0, rowComparator, false),
+      null, now - ttl, now, null);
+
+    Tag ttlTag = new ArrayBackedTag(TagType.TTL_TAG_TYPE, Bytes.toBytes(cellTTL));
+    KeyValue v3 = new KeyValue(row1, fam1, col1, now - cellTTL - 1, data, new Tag[] { ttlTag });
+    KeyValue v2 = new KeyValue(row1, fam1, col1, now - cellTTL - 2, data, new Tag[] { ttlTag });
+    KeyValue v1 = new KeyValue(row1, fam1, col1, now - cellTTL - 3, data);
+
+    qm.setToNewRow(v3);
+
+    // v3, v2 expired: both skipped, column versions = 2
+    assertEquals(MatchCode.SKIP, qm.match(v3));
+    assertEquals(MatchCode.SKIP, qm.match(v2));
+
+    // v1: total column versions = 3 > CF VERSIONS=2 -> blocked
+    assertEquals(MatchCode.SEEK_NEXT_COL, qm.match(v1));
   }
 }

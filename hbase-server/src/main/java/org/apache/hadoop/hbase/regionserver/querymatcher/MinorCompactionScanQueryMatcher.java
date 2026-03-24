@@ -38,6 +38,9 @@ public class MinorCompactionScanQueryMatcher extends CompactionScanQueryMatcher 
   public MatchCode match(ExtendedCell cell) throws IOException {
     MatchCode returnCode = preCheck(cell);
     if (returnCode != null) {
+      if (returnCode == MatchCode.SKIP) {
+        trackColumnVersion(cell);
+      }
       return returnCode;
     }
     long mvccVersion = cell.getSequenceId();
@@ -51,6 +54,10 @@ public class MinorCompactionScanQueryMatcher extends CompactionScanQueryMatcher 
       return MatchCode.INCLUDE;
     }
     returnCode = checkDeleted(deletes, cell);
+    if (returnCode != null) {
+      return returnCode;
+    }
+    returnCode = checkCFVersionLimit(cell);
     if (returnCode != null) {
       return returnCode;
     }
