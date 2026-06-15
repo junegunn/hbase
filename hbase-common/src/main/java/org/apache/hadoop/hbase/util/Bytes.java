@@ -289,7 +289,7 @@ public class Bytes implements Comparable<Bytes> {
 
     @Override
     public int compare(byte[] b1, int s1, int l1, byte[] b2, int s2, int l2) {
-      return LexicographicalComparerHolder.BEST_COMPARER.compareTo(b1, s1, l1, b2, s2, l2);
+      return compareTo(b1, s1, l1, b2, s2, l2);
     }
   }
 
@@ -1140,8 +1140,13 @@ public class Bytes implements Comparable<Bytes> {
    * @return 0 if equal, &lt; 0 if left is less than right, etc.
    */
   public static int compareTo(final byte[] left, final byte[] right) {
-    return LexicographicalComparerHolder.BEST_COMPARER.compareTo(left, 0,
-      left == null ? 0 : left.length, right, 0, right == null ? 0 : right.length);
+    // Treat null as an empty array, as callers have historically relied on
+    int leftLength = left == null ? 0 : left.length;
+    int rightLength = right == null ? 0 : right.length;
+    if (leftLength == 0 || rightLength == 0) {
+      return leftLength - rightLength;
+    }
+    return Arrays.compareUnsigned(left, 0, leftLength, right, 0, rightLength);
   }
 
   /**
@@ -1156,12 +1161,8 @@ public class Bytes implements Comparable<Bytes> {
    */
   public static int compareTo(byte[] buffer1, int offset1, int length1, byte[] buffer2, int offset2,
     int length2) {
-    return LexicographicalComparerHolder.BEST_COMPARER.compareTo(buffer1, offset1, length1, buffer2,
-      offset2, length2);
-  }
-
-  interface Comparer<T> {
-    int compareTo(T buffer1, int offset1, int length1, T buffer2, int offset2, int length2);
+    return Arrays.compareUnsigned(buffer1, offset1, offset1 + length1, buffer2, offset2,
+      offset2 + length2);
   }
 
   static abstract class Converter {
@@ -1177,15 +1178,6 @@ public class Bytes implements Comparable<Bytes> {
 
     abstract int putShort(byte[] bytes, int offset, short val);
 
-  }
-
-  static abstract class CommonPrefixer {
-    abstract int findCommonPrefix(byte[] left, int leftOffset, int leftLength, byte[] right,
-      int rightOffset, int rightLength);
-  }
-
-  static Comparer<byte[]> lexicographicalComparerJavaImpl() {
-    return LexicographicalComparerHolder.PureJavaComparer.INSTANCE;
   }
 
   static class ConverterHolder {
@@ -1326,239 +1318,12 @@ public class Bytes implements Comparable<Bytes> {
   }
 
   /**
-   * Provides a lexicographical comparer implementation; either a Java implementation or a faster
-   * implementation based on {@code Unsafe}.
-   * <p>
-   * Uses reflection to gracefully fall back to the Java implementation if {@code Unsafe} isn't
-   * available.
-   */
-  static class LexicographicalComparerHolder {
-    static final String UNSAFE_COMPARER_NAME =
-      LexicographicalComparerHolder.class.getName() + "$UnsafeComparer";
-
-    static final Comparer<byte[]> BEST_COMPARER = getBestComparer();
-
-    /**
-     * Returns the Unsafe-using Comparer, or falls back to the pure-Java implementation if unable to
-     * do so.
-     */
-    static Comparer<byte[]> getBestComparer() {
-      try {
-        Class<?> theClass = Class.forName(UNSAFE_COMPARER_NAME);
-
-        // yes, UnsafeComparer does implement Comparer<byte[]>
-        @SuppressWarnings("unchecked")
-        Comparer<byte[]> comparer = (Comparer<byte[]>) theClass.getEnumConstants()[0];
-        return comparer;
-      } catch (Throwable t) { // ensure we really catch *everything*
-        return lexicographicalComparerJavaImpl();
-      }
-    }
-
-    enum PureJavaComparer implements Comparer<byte[]> {
-      INSTANCE;
-
-      @Override
-      public int compareTo(byte[] buffer1, int offset1, int length1, byte[] buffer2, int offset2,
-        int length2) {
-        // Short circuit equal case
-        if (buffer1 == buffer2 && offset1 == offset2 && length1 == length2) {
-          return 0;
-        }
-        // Bring WritableComparator code local
-        int end1 = offset1 + length1;
-        int end2 = offset2 + length2;
-        for (int i = offset1, j = offset2; i < end1 && j < end2; i++, j++) {
-          int a = (buffer1[i] & 0xff);
-          int b = (buffer2[j] & 0xff);
-          if (a != b) {
-            return a - b;
-          }
-        }
-        return length1 - length2;
-      }
-    }
-
-    enum UnsafeComparer implements Comparer<byte[]> {
-      INSTANCE;
-
-      static {
-        if (!UNSAFE_UNALIGNED) {
-          // It doesn't matter what we throw;
-          // it's swallowed in getBestComparer().
-          throw new Error();
-        }
-
-        // sanity check - this should never fail
-        if (HBasePlatformDependent.arrayIndexScale(byte[].class) != 1) {
-          throw new AssertionError();
-        }
-      }
-
-      /**
-       * Lexicographically compare two arrays.
-       * @param buffer1 left operand
-       * @param buffer2 right operand
-       * @param offset1 Where to start comparing in the left buffer
-       * @param offset2 Where to start comparing in the right buffer
-       * @param length1 How much to compare from the left buffer
-       * @param length2 How much to compare from the right buffer
-       * @return 0 if equal, < 0 if left is less than right, etc.
-       */
-      @Override
-      public int compareTo(byte[] buffer1, int offset1, int length1, byte[] buffer2, int offset2,
-        int length2) {
-
-        // Short circuit equal case
-        if (buffer1 == buffer2 && offset1 == offset2 && length1 == length2) {
-          return 0;
-        }
-        final int stride = 8;
-        final int minLength = Math.min(length1, length2);
-        int strideLimit = minLength & ~(stride - 1);
-        final long offset1Adj = offset1 + UnsafeAccess.BYTE_ARRAY_BASE_OFFSET;
-        final long offset2Adj = offset2 + UnsafeAccess.BYTE_ARRAY_BASE_OFFSET;
-        int i;
-
-        /*
-         * Compare 8 bytes at a time. Benchmarking on x86 shows a stride of 8 bytes is no slower
-         * than 4 bytes even on 32-bit. On the other hand, it is substantially faster on 64-bit.
-         */
-        for (i = 0; i < strideLimit; i += stride) {
-          long lw = HBasePlatformDependent.getLong(buffer1, offset1Adj + i);
-          long rw = HBasePlatformDependent.getLong(buffer2, offset2Adj + i);
-          if (lw != rw) {
-            if (!UnsafeAccess.LITTLE_ENDIAN) {
-              return ((lw + Long.MIN_VALUE) < (rw + Long.MIN_VALUE)) ? -1 : 1;
-            }
-
-            /*
-             * We want to compare only the first index where left[index] != right[index]. This
-             * corresponds to the least significant nonzero byte in lw ^ rw, since lw and rw are
-             * little-endian. Long.numberOfTrailingZeros(diff) tells us the least significant
-             * nonzero bit, and zeroing out the first three bits of L.nTZ gives us the shift to get
-             * that least significant nonzero byte. This comparison logic is based on UnsignedBytes
-             * comparator from guava v21
-             */
-            int n = Long.numberOfTrailingZeros(lw ^ rw) & ~0x7;
-            return ((int) ((lw >>> n) & 0xFF)) - ((int) ((rw >>> n) & 0xFF));
-          }
-        }
-
-        // The epilogue to cover the last (minLength % stride) elements.
-        for (; i < minLength; i++) {
-          int a = (buffer1[offset1 + i] & 0xFF);
-          int b = (buffer2[offset2 + i] & 0xFF);
-          if (a != b) {
-            return a - b;
-          }
-        }
-        return length1 - length2;
-      }
-    }
-  }
-
-  static class CommonPrefixerHolder {
-    static final String UNSAFE_COMMON_PREFIXER_NAME =
-      CommonPrefixerHolder.class.getName() + "$UnsafeCommonPrefixer";
-
-    static final CommonPrefixer BEST_COMMON_PREFIXER = getBestCommonPrefixer();
-
-    static CommonPrefixer getBestCommonPrefixer() {
-      try {
-        Class<? extends CommonPrefixer> theClass =
-          Class.forName(UNSAFE_COMMON_PREFIXER_NAME).asSubclass(CommonPrefixer.class);
-
-        return theClass.getConstructor().newInstance();
-      } catch (Throwable t) { // ensure we really catch *everything*
-        return CommonPrefixerHolder.PureJavaCommonPrefixer.INSTANCE;
-      }
-    }
-
-    static final class PureJavaCommonPrefixer extends CommonPrefixer {
-      static final PureJavaCommonPrefixer INSTANCE = new PureJavaCommonPrefixer();
-
-      private PureJavaCommonPrefixer() {
-      }
-
-      @Override
-      public int findCommonPrefix(byte[] left, int leftOffset, int leftLength, byte[] right,
-        int rightOffset, int rightLength) {
-        int length = Math.min(leftLength, rightLength);
-        int result = 0;
-
-        while (result < length && left[leftOffset + result] == right[rightOffset + result]) {
-          result++;
-        }
-        return result;
-      }
-    }
-
-    static final class UnsafeCommonPrefixer extends CommonPrefixer {
-
-      static {
-        if (!UNSAFE_UNALIGNED) {
-          throw new Error();
-        }
-
-        // sanity check - this should never fail
-        if (HBasePlatformDependent.arrayIndexScale(byte[].class) != 1) {
-          throw new AssertionError();
-        }
-      }
-
-      public UnsafeCommonPrefixer() {
-      }
-
-      @Override
-      public int findCommonPrefix(byte[] left, int leftOffset, int leftLength, byte[] right,
-        int rightOffset, int rightLength) {
-        final int stride = 8;
-        final int minLength = Math.min(leftLength, rightLength);
-        int strideLimit = minLength & ~(stride - 1);
-        final long leftOffsetAdj = leftOffset + UnsafeAccess.BYTE_ARRAY_BASE_OFFSET;
-        final long rightOffsetAdj = rightOffset + UnsafeAccess.BYTE_ARRAY_BASE_OFFSET;
-        int result = 0;
-        int i;
-
-        for (i = 0; i < strideLimit; i += stride) {
-          long lw = HBasePlatformDependent.getLong(left, leftOffsetAdj + i);
-          long rw = HBasePlatformDependent.getLong(right, rightOffsetAdj + i);
-          if (lw != rw) {
-            if (!UnsafeAccess.LITTLE_ENDIAN) {
-              return result + (Long.numberOfLeadingZeros(lw ^ rw) / Bytes.SIZEOF_LONG);
-            } else {
-              return result + (Long.numberOfTrailingZeros(lw ^ rw) / Bytes.SIZEOF_LONG);
-            }
-          } else {
-            result += Bytes.SIZEOF_LONG;
-          }
-        }
-
-        // The epilogue to cover the last (minLength % stride) elements.
-        for (; i < minLength; i++) {
-          int il = (left[leftOffset + i]);
-          int ir = (right[rightOffset + i]);
-          if (il != ir) {
-            return result;
-          } else {
-            result++;
-          }
-        }
-
-        return result;
-      }
-    }
-  }
-
-  /**
    * Lexicographically determine the equality of two arrays.
    * @param left  left operand
    * @param right right operand
    * @return True if equal
    */
   public static boolean equals(final byte[] left, final byte[] right) {
-    // Could use Arrays.equals?
     // noinspection SimplifiableConditionalExpression
     if (left == right) return true;
     if (left == null || right == null) return false;
@@ -1570,7 +1335,7 @@ public class Bytes implements Comparable<Bytes> {
     // so check that first
     if (left[left.length - 1] != right[right.length - 1]) return false;
 
-    return compareTo(left, right) == 0;
+    return Arrays.equals(left, right);
   }
 
   /**
@@ -1602,8 +1367,8 @@ public class Bytes implements Comparable<Bytes> {
     // so check that first
     if (left[leftOffset + leftLen - 1] != right[rightOffset + rightLen - 1]) return false;
 
-    return LexicographicalComparerHolder.BEST_COMPARER.compareTo(left, leftOffset, leftLen, right,
-      rightOffset, rightLen) == 0;
+    return Arrays.equals(left, leftOffset, leftOffset + leftLen, right, rightOffset,
+      rightOffset + rightLen);
   }
 
   /**
@@ -1632,8 +1397,7 @@ public class Bytes implements Comparable<Bytes> {
    */
   public static boolean startsWith(byte[] bytes, byte[] prefix) {
     return bytes != null && prefix != null && bytes.length >= prefix.length
-      && LexicographicalComparerHolder.BEST_COMPARER.compareTo(bytes, 0, prefix.length, prefix, 0,
-        prefix.length) == 0;
+      && Arrays.equals(bytes, 0, prefix.length, prefix, 0, prefix.length);
   }
 
   /**
@@ -2527,7 +2291,9 @@ public class Bytes implements Comparable<Bytes> {
 
   public static int findCommonPrefix(byte[] left, byte[] right, int leftLength, int rightLength,
     int leftOffset, int rightOffset) {
-    return CommonPrefixerHolder.BEST_COMMON_PREFIXER.findCommonPrefix(left, leftOffset, leftLength,
-      right, rightOffset, rightLength);
+    int length = Math.min(leftLength, rightLength);
+    int mismatch = Arrays.mismatch(left, leftOffset, leftOffset + length, right, rightOffset,
+      rightOffset + length);
+    return mismatch == -1 ? length : mismatch;
   }
 }
