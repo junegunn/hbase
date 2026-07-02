@@ -40,6 +40,11 @@ public class MetricsTableRequests {
 
   public static final boolean ENABLE_TABLE_QUERY_METER_METRICS_KEY_DEFAULT = false;
 
+  public static final String ENABLE_TABLE_MULTI_ACTION_COUNT_METRICS_KEY =
+    "hbase.regionserver.enable.table.multi.action.count";
+
+  public static final boolean ENABLE_TABLE_MULTI_ACTION_COUNT_METRICS_DEFAULT = true;
+
   /**
    * The name of the metrics
    */
@@ -81,6 +86,7 @@ public class MetricsTableRequests {
   String APPEND_BLOCK_BYTES_SCANNED_KEY = "appendBlockBytesScanned";
   private final static String TABLE_READ_QUERY_PER_SECOND = "tableReadQueryPerSecond";
   private final static String TABLE_WRITE_QUERY_PER_SECOND = "tableWriteQueryPerSecond";
+  private final static String MULTI_ACTION_COUNT = "multiActionCount";
 
   private Histogram getTimeHistogram;
   private Histogram scanTimeHistogram;
@@ -104,6 +110,8 @@ public class MetricsTableRequests {
   private Meter readMeter;
   private Meter writeMeter;
 
+  private Histogram multiActionCountHistogram;
+
   private MetricRegistry registry;
   private TableName tableName;
   private Configuration conf;
@@ -111,6 +119,7 @@ public class MetricsTableRequests {
 
   private boolean enableTableLatenciesMetrics;
   private boolean enableTableQueryMeterMetrics;
+  private boolean enableTableMultiActionCountMetrics;
 
   public boolean isEnableTableLatenciesMetrics() {
     return enableTableLatenciesMetrics;
@@ -118,6 +127,10 @@ public class MetricsTableRequests {
 
   public boolean isEnableTableQueryMeterMetrics() {
     return enableTableQueryMeterMetrics;
+  }
+
+  public boolean isEnableTableMultiActionCountMetrics() {
+    return enableTableMultiActionCountMetrics;
   }
 
   public MetricsTableRequests(TableName tableName, Configuration conf) {
@@ -131,8 +144,17 @@ public class MetricsTableRequests {
       ENABLE_TABLE_LATENCIES_METRICS_DEFAULT);
     enableTableQueryMeterMetrics = this.conf.getBoolean(ENABLE_TABLE_QUERY_METER_METRICS_KEY,
       ENABLE_TABLE_QUERY_METER_METRICS_KEY_DEFAULT);
-    if (enableTableLatenciesMetrics || enableTableQueryMeterMetrics) {
+    enableTableMultiActionCountMetrics =
+      this.conf.getBoolean(ENABLE_TABLE_MULTI_ACTION_COUNT_METRICS_KEY,
+        ENABLE_TABLE_MULTI_ACTION_COUNT_METRICS_DEFAULT);
+    if (
+      enableTableLatenciesMetrics || enableTableQueryMeterMetrics
+        || enableTableMultiActionCountMetrics
+    ) {
       registry = createRegistryForTableRequests();
+      if (enableTableMultiActionCountMetrics) {
+        multiActionCountHistogram = registry.histogram(MULTI_ACTION_COUNT);
+      }
       if (enableTableLatenciesMetrics) {
         getTimeHistogram = registry.histogram(GET_TIME);
         scanTimeHistogram = registry.histogram(SCAN_TIME);
@@ -173,7 +195,10 @@ public class MetricsTableRequests {
   }
 
   public void removeRegistry() {
-    if (enableTableLatenciesMetrics || enableTableQueryMeterMetrics) {
+    if (
+      enableTableLatenciesMetrics || enableTableQueryMeterMetrics
+        || enableTableMultiActionCountMetrics
+    ) {
       MetricRegistries.global().remove(registry.getMetricRegistryInfo());
     }
   }
@@ -184,6 +209,18 @@ public class MetricsTableRequests {
     sb.append("Namespace_").append(tableName.getNamespaceAsString());
     sb.append("_table_").append(tableName.getQualifierAsString());
     return sb.toString();
+  }
+
+  /**
+   * Update the histogram of the number of actions per multi (batch) request for this table. One
+   * observation is recorded per multi request that includes at least one action for this table; the
+   * value is the total number of this table's actions in that request.
+   * @param numActions number of this table's actions in the multi request
+   */
+  public void updateMultiActionCount(int numActions) {
+    if (isEnableTableMultiActionCountMetrics()) {
+      multiActionCountHistogram.update(numActions);
+    }
   }
 
   /**

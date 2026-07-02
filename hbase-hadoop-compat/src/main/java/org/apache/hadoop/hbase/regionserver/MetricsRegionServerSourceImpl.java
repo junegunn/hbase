@@ -45,6 +45,7 @@ public class MetricsRegionServerSourceImpl extends BaseSourceImpl
   private final MetricHistogram incrementHisto;
   private final MetricHistogram appendHisto;
   private final MetricHistogram replayHisto;
+  private final MetricHistogram multiActionCountHisto;
   private final MetricHistogram scanSizeHisto;
   private final MetricHistogram scanTimeHisto;
 
@@ -127,6 +128,8 @@ public class MetricsRegionServerSourceImpl extends BaseSourceImpl
     slowAppend = getMetricsRegistry().newCounter(SLOW_APPEND_KEY, SLOW_APPEND_DESC, 0L);
 
     replayHisto = getMetricsRegistry().newTimeHistogram(REPLAY_KEY);
+    multiActionCountHisto = getMetricsRegistry()
+      .newHistogram(MULTI_ACTION_COUNT_KEY, MULTI_ACTION_COUNT_DESC);
     scanSizeHisto = getMetricsRegistry().newSizeHistogram(SCAN_SIZE_KEY);
     scanTimeHisto = getMetricsRegistry().newTimeHistogram(SCAN_TIME_KEY);
 
@@ -234,6 +237,11 @@ public class MetricsRegionServerSourceImpl extends BaseSourceImpl
   @Override
   public void updateReplay(long t) {
     replayHisto.add(t);
+  }
+
+  @Override
+  public void updateMultiActionCount(int numActions) {
+    multiActionCountHisto.add(numActions);
   }
 
   @Override

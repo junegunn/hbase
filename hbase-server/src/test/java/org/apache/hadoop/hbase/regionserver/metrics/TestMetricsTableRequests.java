@@ -90,6 +90,38 @@ public class TestMetricsTableRequests {
   }
 
   @Test
+  public void testMultiActionCount() {
+    TableName tn = TableName.valueOf("tableMulti");
+    MetricsTableRequests requests = new MetricsTableRequests(tn, new Configuration());
+    MetricRegistryInfo info = requests.getMetricRegistryInfo();
+    Optional<MetricRegistry> registry = MetricRegistries.global().get(info);
+    assertTrue(registry.isPresent());
+
+    requests.updateMultiActionCount(7);
+    Snapshot snapshot =
+      ((HistogramImpl) registry.get().get("multiActionCount").get()).snapshot();
+    assertEquals(7, snapshot.get99thPercentile());
+  }
+
+  @Test
+  public void testMultiActionCountSwitch() {
+    TableName tn = TableName.valueOf("tableMultiOff");
+    Configuration conf = new Configuration();
+    // metric is on by default; disabling it should leave the histogram unregistered
+    assertTrue(conf.getBoolean(MetricsTableRequests.ENABLE_TABLE_MULTI_ACTION_COUNT_METRICS_KEY,
+      MetricsTableRequests.ENABLE_TABLE_MULTI_ACTION_COUNT_METRICS_DEFAULT));
+    conf.setBoolean(MetricsTableRequests.ENABLE_TABLE_MULTI_ACTION_COUNT_METRICS_KEY, false);
+
+    MetricsTableRequests requests = new MetricsTableRequests(tn, conf);
+    MetricRegistryInfo info = requests.getMetricRegistryInfo();
+    Optional<MetricRegistry> registry = MetricRegistries.global().get(info);
+    assertTrue(registry.isPresent());
+
+    requests.updateMultiActionCount(7);
+    assertFalse(registry.get().get("multiActionCount").isPresent());
+  }
+
+  @Test
   public void testTableQueryMeterSwitch() {
     TableName tn1 = TableName.valueOf("table1");
     Configuration conf = new Configuration();

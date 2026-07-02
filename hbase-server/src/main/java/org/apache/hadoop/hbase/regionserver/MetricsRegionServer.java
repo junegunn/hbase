@@ -201,6 +201,10 @@ public class MetricsRegionServer {
     userAggregate.updateReplay(t);
   }
 
+  public void updateMultiActionCount(int numActions) {
+    serverSource.updateMultiActionCount(numActions);
+  }
+
   public void updateScan(HRegion region, long time, long responseCellSize, long blockBytesScanned) {
     if (region.getMetricsTableRequests() != null) {
       region.getMetricsTableRequests().updateScan(time, responseCellSize, blockBytesScanned);

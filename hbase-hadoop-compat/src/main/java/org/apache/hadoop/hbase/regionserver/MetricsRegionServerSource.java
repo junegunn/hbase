@@ -119,6 +119,12 @@ public interface MetricsRegionServerSource extends BaseSource, JvmPauseMonitorSo
   void updateReplay(long t);
 
   /**
+   * Update the number of actions in a multi (batch) request received by this RegionServer.
+   * @param numActions number of actions in the multi request
+   */
+  void updateMultiActionCount(int numActions);
+
+  /**
    * Update the scan metrics.
    * @param time              response time of scan
    * @param responseCellSize  size of the scan resposne
@@ -462,6 +468,9 @@ public interface MetricsRegionServerSource extends BaseSource, JvmPauseMonitorSo
   String PUT_BATCH_KEY = "putBatch";
   String APPEND_KEY = "append";
   String REPLAY_KEY = "replay";
+  String MULTI_ACTION_COUNT_KEY = "multiActionCount";
+  String MULTI_ACTION_COUNT_DESC =
+    "Histogram of actions per multi (batch) request received by this RegionServer";
   String SCAN_KEY = "scan";
   String SCAN_SIZE_KEY = "scanSize";
   String SCAN_TIME_KEY = "scanTime";

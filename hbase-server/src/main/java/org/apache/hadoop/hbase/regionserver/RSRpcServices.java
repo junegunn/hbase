@@ -2630,7 +2630,8 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
     return r;
   }
 
-  private void checkBatchSizeAndLogLargeSize(MultiRequest request) throws ServiceException {
+  /** Returns the total number of actions across all region actions in the multi request. */
+  private int checkBatchSizeAndLogLargeSize(MultiRequest request) throws ServiceException {
     int sum = 0;
     String firstRegionName = null;
     for (RegionAction regionAction : request.getRegionActionList()) {
@@ -2650,6 +2651,19 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
             + firstRegionName + " , Requested Number of Rows: " + sum + " , Size Threshold: "
             + rowSizeWarnThreshold);
       }
+    }
+    return sum;
+  }
+
+  /**
+   * Records the per-table {@code multiActionCount} histogram for one table involved in a multi
+   * request, valued by the total number of that table's actions in the request. The per-table
+   * counts are accumulated in {@link #multi} as regions are resolved (so this reuses those
+   * lookups instead of resolving regions again), then flushed here once per table.
+   */
+  private void updateTableMultiActionCountMetric(HRegion region, int numActions) {
+    if (region.getMetricsTableRequests() != null) {
+      region.getMetricsTableRequests().updateMultiActionCount(numActions);
     }
   }
 
@@ -2697,7 +2711,7 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
       throw new ServiceException(ie);
     }
 
-    checkBatchSizeAndLogLargeSize(request);
+    int numActions = checkBatchSizeAndLogLargeSize(request);
 
     // rpc controller is how we bring in data via the back door; it is unprotobuf'ed data.
     // It is also the conduit via which we pass back data.
@@ -2709,6 +2723,10 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
     MultiResponse.Builder responseBuilder = MultiResponse.newBuilder();
     RegionActionResult.Builder regionActionResultBuilder = RegionActionResult.newBuilder();
     this.rpcMultiRequestCount.increment();
+    final MetricsRegionServer metricsRegionServer = server.getMetrics();
+    if (metricsRegionServer != null) {
+      metricsRegionServer.updateMultiActionCount(numActions);
+    }
     this.requestCount.increment();
     ActivePolicyEnforcement spaceQuotaEnforcement = getSpaceQuotaManager().getActiveEnforcements();
 
@@ -2740,6 +2758,9 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
         failRegionAction(responseBuilder, regionActionResultBuilder, regionAction, cellScanner, e);
         return responseBuilder.build();
       }
+
+      // Single region action, so its action count is this table's total for the request.
+      updateTableMultiActionCountMetric(region, regionAction.getActionCount());
 
       try {
         boolean rejectIfFromClient = shouldRejectRequestsFromClient(region);
@@ -2789,6 +2810,12 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
     Map<RegionSpecifier, ClientProtos.RegionLoadStats> regionStats =
       new HashMap<>(request.getRegionActionCount());
 
+    // Per-table action counts for the multiActionCount metric, summed across the request's
+    // region actions and flushed once per table after the loop. Empty maps don't allocate a backing
+    // array until first use, so these stay cheap when the metric is disabled.
+    final Map<TableName, Integer> multiActionCountByTable = new HashMap<>();
+    final Map<TableName, HRegion> multiActionCountRegionByTable = new HashMap<>();
+
     for (RegionAction regionAction : request.getRegionActionList()) {
       OperationQuota quota;
       HRegion region;
@@ -2802,6 +2829,15 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
       } catch (IOException e) {
         failRegionAction(responseBuilder, regionActionResultBuilder, regionAction, cellScanner, e);
         continue; // For this region it's a failure.
+      }
+
+      if (
+        region.getMetricsTableRequests() != null
+          && region.getMetricsTableRequests().isEnableTableMultiActionCountMetrics()
+      ) {
+        TableName tableName = region.getRegionInfo().getTable();
+        multiActionCountByTable.merge(tableName, regionAction.getActionCount(), Integer::sum);
+        multiActionCountRegionByTable.putIfAbsent(tableName, region);
       }
 
       try {
@@ -2912,6 +2948,10 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
       if (regionLoadStats != null) {
         regionStats.put(regionSpecifier, regionLoadStats);
       }
+    }
+    for (Map.Entry<TableName, Integer> entry : multiActionCountByTable.entrySet()) {
+      updateTableMultiActionCountMetric(multiActionCountRegionByTable.get(entry.getKey()),
+        entry.getValue());
     }
     // Load the controller with the Cells to return.
     if (cellsToReturn != null && !cellsToReturn.isEmpty() && controller != null) {

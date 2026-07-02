@@ -365,4 +365,11 @@ public class TestMetricsRegionServer {
     rsm.incrSplitRequest(null);
     HELPER.assertCounter("splitRequestCount", 1, serverSource);
   }
+
+  @Test
+  public void testMultiActionCount() {
+    rsm.updateMultiActionCount(5);
+    rsm.updateMultiActionCount(100);
+    HELPER.assertCounter("multiActionCount_num_ops", 2, serverSource);
+  }
 }
